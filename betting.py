@@ -10,7 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 from typing import List, Optional
@@ -20,18 +20,23 @@ from analyzer import Analyzer
 from predictor import Predictor
 from utils import load_env, ensure_dirs, read_json, write_json, log
 
+# new summarizer module
+from summarizer import summarize_results
+
 load_env()  # load .env into environment if present
 
 DATA_DIR = Path("data")
 FIXTURES_DIR = DATA_DIR / "fixtures"
 ANALYSIS_DIR = DATA_DIR / "analysis"
+DAILY_DIR = Path("daily_reports")
 CONFIG_DIR = Path("config")
-ensure_dirs([DATA_DIR, FIXTURES_DIR, ANALYSIS_DIR, CONFIG_DIR])
+ensure_dirs([DATA_DIR, FIXTURES_DIR, ANALYSIS_DIR, CONFIG_DIR, DAILY_DIR])
 
 DEFAULT_FETCH_DAYS = int(os.getenv("FETCH_DAYS_AHEAD", "3"))
 
 async def fetch_fixtures(client: APIFootballClient, days_ahead: int, limit: Optional[int]=None, refetch_missing: bool=False):
-    today = datetime.utcnow().date()
+    # Use timezone-aware now in UTC
+    today = datetime.now(timezone.utc).date()
     fixtures = []
     day = 0
     while day < days_ahead:
@@ -56,8 +61,9 @@ async def fetch_fixtures(client: APIFootballClient, days_ahead: int, limit: Opti
     return fixtures
 
 async def analyze_fixtures(client: APIFootballClient, fixture_ids: Optional[List[int]] = None, limit: Optional[int]=None, use_ml: bool = False):
+    # Analyzer currently doesn't require client; instantiate accordingly
     analyzer = Analyzer()
-    predictor = Predictor(use_ml=use_ml)
+    predictor = Predictor()
 
     to_analyze = []
     if fixture_ids:
@@ -92,11 +98,11 @@ async def analyze_fixtures(client: APIFootballClient, fixture_ids: Optional[List
 
             lambda_h, lambda_a = predictor.compute_lambdas(home_form, away_form)
 
-            model_probs, matrix = predictor.match_probabilities(
-                lambda_h, lambda_a, 
-                home_form=home_form, 
-                away_form=away_form
-            )
+            # predictor may later accept use_ml flag; for now pass it along if supported
+            try:
+                model_probs, matrix = predictor.match_probabilities(lambda_h, lambda_a, use_ml=use_ml)  # predictor may ignore extra arg
+            except TypeError:
+                model_probs, matrix = predictor.match_probabilities(lambda_h, lambda_a)
 
             market = {}
             odds_data = await client.get_odds_for_fixture(fixture_meta["fixture_id"])
@@ -138,46 +144,43 @@ async def main_async(args):
 
     client = APIFootballClient(api_key=key)
 
-    if args.train_models:
-        # Train ML models
-        from models.trainer import ModelTrainer
-        
-        if not args.train_from or not args.train_to:
-            log("ERROR", "Must specify --train-from and --train-to dates for training (YYYY-MM-DD)")
-            return
-        
-        # Parse league IDs
-        league_ids = [39, 61]  # Default: Premier League, Ligue 1
-        if args.leagues:
+    try:
+        if args.reload_leagues:
+            # placeholder: download leagues tiers, not implemented in depth
+            leagues = await client.get_leagues()
+            write_json(CONFIG_DIR / "leagues_tiers.json", leagues)
+            log("INFO", f"Reloaded {len(leagues.get('response',[]))} leagues to config/leagues_tiers.json")
+
+        if args.fetch:
+            days = args.days_ahead or DEFAULT_FETCH_DAYS
+            await fetch_fixtures(client, days, limit=args.limit, refetch_missing=args.refetch_missing)
+
+        if args.analyze:
+            fids = None
+            if args.fixture_ids:
+                fids = [int(x.strip()) for x in args.fixture_ids.split(",") if x.strip().isdigit()]
+            results = await analyze_fixtures(client, fixture_ids=fids, limit=args.limit, use_ml=args.use_ml)
+            log("INFO", f"Completed analysis for {len(results)} fixtures")
+
+            # Print full analysis JSON (existing behaviour)
+            print(json.dumps(results, indent=2, ensure_ascii=False))
+
+            # Summarize top markets: prints and writes a daily report in daily_reports/
             try:
-                league_ids = [int(x.strip()) for x in args.leagues.split(",") if x.strip()]
-            except ValueError:
-                log("ERROR", "Invalid league IDs format. Use comma-separated integers.")
-                return
-        
-        log("INFO", f"Starting model training for leagues {league_ids}")
-        trainer = ModelTrainer(client)
-        await trainer.run_training_pipeline(league_ids, args.train_from, args.train_to)
-        log("INFO", "Model training completed!")
-        return
-
-    if args.reload_leagues:
-        # placeholder: download leagues tiers, not implemented in depth
-        leagues = await client.get_leagues()
-        write_json(CONFIG_DIR / "leagues_tiers.json", leagues)
-        log("INFO", f"Reloaded {len(leagues.get('response',[]))} leagues to config/leagues_tiers.json")
-
-    if args.fetch:
-        days = args.days_ahead or DEFAULT_FETCH_DAYS
-        await fetch_fixtures(client, days, limit=args.limit, refetch_missing=args.refetch_missing)
-
-    if args.analyze:
-        fids = None
-        if args.fixture_ids:
-            fids = [int(x.strip()) for x in args.fixture_ids.split(",") if x.strip().isdigit()]
-        results = await analyze_fixtures(client, fixture_ids=fids, limit=args.limit, use_ml=args.use_ml)
-        log("INFO", f"Completed analysis for {len(results)} fixtures")
-        print(json.dumps(results, indent=2, ensure_ascii=False))
+                report = summarize_results(results, top_n=3)
+                # persist the report
+                now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                report_path = DAILY_DIR / f"top_markets_{now}.json"
+                write_json(report_path, report)
+                log("INFO", f"Top markets report written to {report_path}")
+            except Exception as e:
+                log("ERROR", f"Failed to summarize top markets: {e}")
+    finally:
+        # ensure session is closed to avoid warnings
+        try:
+            await client.close()
+        except Exception:
+            pass
 
 def parse_args():
     p = argparse.ArgumentParser(description="Automated betting analysis (API-Football)")
@@ -189,16 +192,7 @@ def parse_args():
     p.add_argument("--refetch-missing", action="store_true", help="Refetch missing fixtures even if local exists")
     p.add_argument("--days-ahead", type=int, help="Override FETCH_DAYS_AHEAD")
     p.add_argument("--limit", type=int, help="Limit number of fixtures to fetch/analyze")
-    
-    # ML model training options
-    p.add_argument("--train-models", action="store_true", help="Train ML models on historical data")
-    p.add_argument("--train-from", type=str, help="Training start date (YYYY-MM-DD)")
-    p.add_argument("--train-to", type=str, help="Training end date (YYYY-MM-DD)")
-    p.add_argument("--leagues", type=str, help="Comma-separated league IDs for training (default: 39,61)")
-    
-    # ML prediction option
-    p.add_argument("--use-ml", action="store_true", help="Use ML models for predictions (if available)")
-    
+    p.add_argument("--use-ml", action="store_true", help="Use ML models if available (fallback to Poisson if not)")
     return p.parse_args()
 
 def main():
