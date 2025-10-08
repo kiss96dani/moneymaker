@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""
+Entrypoint CLI for the automated betting analyzer.
+
+Usage examples (see README.md for full list):
+  python betting.py --fetch --analyze
+  python betting.py --analyze --fixture-ids 12345,67890
+"""
+from __future__ import annotations
+import argparse
+import asyncio
+import os
+from datetime import datetime, timedelta
+import json
+from pathlib import Path
+from typing import List, Optional
+
+from apifootball_client import APIFootballClient
+from analyzer import Analyzer
+from predictor import Predictor
+from utils import load_env, ensure_dirs, read_json, write_json, log
+
+load_env()  # load .env into environment if present
+
+DATA_DIR = Path("data")
+FIXTURES_DIR = DATA_DIR / "fixtures"
+ANALYSIS_DIR = DATA_DIR / "analysis"
+CONFIG_DIR = Path("config")
+ensure_dirs([DATA_DIR, FIXTURES_DIR, ANALYSIS_DIR, CONFIG_DIR])
+
+DEFAULT_FETCH_DAYS = int(os.getenv("FETCH_DAYS_AHEAD", "3"))
+
+async def fetch_fixtures(client: APIFootballClient, days_ahead: int, limit: Optional[int]=None, refetch_missing: bool=False):
+    today = datetime.utcnow().date()
+    fixtures = []
+    day = 0
+    while day < days_ahead:
+        target = today + timedelta(days=day)
+        day += 1
+        try:
+            res = await client.get_fixtures_by_date(target.isoformat())
+        except Exception as e:
+            log("ERROR", f"Failed to fetch fixtures for {target}: {e}")
+            continue
+        for f in res:
+            fixtures.append(f)
+            fid = f.get("fixture", {}).get("id")
+            if not fid:
+                continue
+            path = FIXTURES_DIR / f"{fid}.json"
+            if path.exists() and not refetch_missing:
+                continue
+            write_json(path, f)
+            if limit and len(fixtures) >= limit:
+                return fixtures
+    return fixtures
+
+async def analyze_fixtures(client: APIFootballClient, fixture_ids: Optional[List[int]] = None, limit: Optional[int]=None):
+    analyzer = Analyzer(client)
+    predictor = Predictor()
+
+    to_analyze = []
+    if fixture_ids:
+        for fid in fixture_ids:
+            path = FIXTURES_DIR / f"{fid}.json"
+            if not path.exists():
+                log("WARNING", f"Fixture {fid} not found in local cache; attempting to download")
+                fdata = await client.get_fixture_by_id(fid)
+                if not fdata:
+                    log("ERROR", f"Could not retrieve fixture {fid}")
+                    continue
+                write_json(path, fdata)
+            to_analyze.append(read_json(path))
+    else:
+        files = sorted(FIXTURES_DIR.glob("*.json"))
+        for p in files[:limit]:
+            to_analyze.append(read_json(p))
+
+    results = []
+    for f in to_analyze:
+        try:
+            fixture_meta = analyzer.extract_fixture_meta(f)
+            home_team = fixture_meta["home_team_id"]
+            away_team = fixture_meta["away_team_id"]
+
+            # collect recent fixtures for both teams
+            home_recent = await client.get_team_recent_fixtures(home_team, limit=10)
+            away_recent = await client.get_team_recent_fixtures(away_team, limit=10)
+
+            home_form = analyzer.calculate_last_n_form(home_recent, team_id=home_team, n=5)
+            away_form = analyzer.calculate_last_n_form(away_recent, team_id=away_team, n=5)
+
+            lambda_h, lambda_a = predictor.compute_lambdas(home_form, away_form)
+
+            model_probs, matrix = predictor.match_probabilities(lambda_h, lambda_a)
+
+            market = {}
+            odds_data = await client.get_odds_for_fixture(fixture_meta["fixture_id"])
+            if odds_data:
+                market = predictor.parse_market_odds(odds_data)
+
+            edge_kelly = predictor.compute_edges_and_kelly(model_probs, market)
+
+            analysis = {
+                "fixture_id": fixture_meta["fixture_id"],
+                "kickoff_utc": fixture_meta["kickoff_utc"],
+                "league_id": fixture_meta["league_id"],
+                "league_name": fixture_meta["league_name"],
+                "home_team": fixture_meta["home_team_name"],
+                "away_team": fixture_meta["away_team_name"],
+                "model_probs": model_probs,
+                "lambda_home": lambda_h,
+                "lambda_away": lambda_a,
+                "market": market,
+                "edge_kelly": edge_kelly,
+                "home_recent": home_form,
+                "away_recent": away_form,
+            }
+
+            results.append(analysis)
+            out_path = ANALYSIS_DIR / f"{fixture_meta['fixture_id']}.analysis.json"
+            write_json(out_path, analysis)
+            log("INFO", f"Analyzed fixture {fixture_meta['fixture_id']} -> {out_path}")
+        except Exception as e:
+            log("ERROR", f"Error analyzing fixture {f.get('fixture', {}).get('id')}: {e}")
+
+    return results
+
+async def main_async(args):
+    key = os.getenv("API_FOOTBALL_KEY")
+    if not key:
+        log("ERROR", "API_FOOTBALL_KEY not set in environment (.env or env variable)")
+        return
+
+    client = APIFootballClient(api_key=key)
+
+    if args.reload_leagues:
+        # placeholder: download leagues tiers, not implemented in depth
+        leagues = await client.get_leagues()
+        write_json(CONFIG_DIR / "leagues_tiers.json", leagues)
+        log("INFO", f"Reloaded {len(leagues.get('response',[]))} leagues to config/leagues_tiers.json")
+
+    if args.fetch:
+        days = args.days_ahead or DEFAULT_FETCH_DAYS
+        await fetch_fixtures(client, days, limit=args.limit, refetch_missing=args.refetch_missing)
+
+    if args.analyze:
+        fids = None
+        if args.fixture_ids:
+            fids = [int(x.strip()) for x in args.fixture_ids.split(",") if x.strip().isdigit()]
+        results = await analyze_fixtures(client, fixture_ids=fids, limit=args.limit)
+        log("INFO", f"Completed analysis for {len(results)} fixtures")
+        print(json.dumps(results, indent=2, ensure_ascii=False))
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Automated betting analysis (API-Football)")
+    p.add_argument("--fetch", action="store_true", help="Fetch fixtures from API-Football")
+    p.add_argument("--analyze", action="store_true", help="Run analysis on cached or fetched fixtures")
+    p.add_argument("--fixture-ids", type=str, help="Comma-separated fixture ids to analyze")
+    p.add_argument("--reload-leagues", action="store_true", help="Reload leagues classification")
+    p.add_argument("--cleanup-stale", action="store_true", help="Cleanup stale fixture files (not implemented)")
+    p.add_argument("--refetch-missing", action="store_true", help="Refetch missing fixtures even if local exists")
+    p.add_argument("--days-ahead", type=int, help="Override FETCH_DAYS_AHEAD")
+    p.add_argument("--limit", type=int, help="Limit number of fixtures to fetch/analyze")
+    return p.parse_args()
+
+def main():
+    args = parse_args()
+    try:
+        asyncio.run(main_async(args))
+    except KeyboardInterrupt:
+        log("WARNING", "Interrupted by user")
+
+if __name__ == "__main__":
+    main()
