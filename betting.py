@@ -55,9 +55,9 @@ async def fetch_fixtures(client: APIFootballClient, days_ahead: int, limit: Opti
                 return fixtures
     return fixtures
 
-async def analyze_fixtures(client: APIFootballClient, fixture_ids: Optional[List[int]] = None, limit: Optional[int]=None):
-    analyzer = Analyzer(client)
-    predictor = Predictor()
+async def analyze_fixtures(client: APIFootballClient, fixture_ids: Optional[List[int]] = None, limit: Optional[int]=None, use_ml: bool = False):
+    analyzer = Analyzer()
+    predictor = Predictor(use_ml=use_ml)
 
     to_analyze = []
     if fixture_ids:
@@ -92,7 +92,11 @@ async def analyze_fixtures(client: APIFootballClient, fixture_ids: Optional[List
 
             lambda_h, lambda_a = predictor.compute_lambdas(home_form, away_form)
 
-            model_probs, matrix = predictor.match_probabilities(lambda_h, lambda_a)
+            model_probs, matrix = predictor.match_probabilities(
+                lambda_h, lambda_a, 
+                home_form=home_form, 
+                away_form=away_form
+            )
 
             market = {}
             odds_data = await client.get_odds_for_fixture(fixture_meta["fixture_id"])
@@ -134,6 +138,29 @@ async def main_async(args):
 
     client = APIFootballClient(api_key=key)
 
+    if args.train_models:
+        # Train ML models
+        from models.trainer import ModelTrainer
+        
+        if not args.train_from or not args.train_to:
+            log("ERROR", "Must specify --train-from and --train-to dates for training (YYYY-MM-DD)")
+            return
+        
+        # Parse league IDs
+        league_ids = [39, 61]  # Default: Premier League, Ligue 1
+        if args.leagues:
+            try:
+                league_ids = [int(x.strip()) for x in args.leagues.split(",") if x.strip()]
+            except ValueError:
+                log("ERROR", "Invalid league IDs format. Use comma-separated integers.")
+                return
+        
+        log("INFO", f"Starting model training for leagues {league_ids}")
+        trainer = ModelTrainer(client)
+        await trainer.run_training_pipeline(league_ids, args.train_from, args.train_to)
+        log("INFO", "Model training completed!")
+        return
+
     if args.reload_leagues:
         # placeholder: download leagues tiers, not implemented in depth
         leagues = await client.get_leagues()
@@ -148,7 +175,7 @@ async def main_async(args):
         fids = None
         if args.fixture_ids:
             fids = [int(x.strip()) for x in args.fixture_ids.split(",") if x.strip().isdigit()]
-        results = await analyze_fixtures(client, fixture_ids=fids, limit=args.limit)
+        results = await analyze_fixtures(client, fixture_ids=fids, limit=args.limit, use_ml=args.use_ml)
         log("INFO", f"Completed analysis for {len(results)} fixtures")
         print(json.dumps(results, indent=2, ensure_ascii=False))
 
@@ -162,6 +189,16 @@ def parse_args():
     p.add_argument("--refetch-missing", action="store_true", help="Refetch missing fixtures even if local exists")
     p.add_argument("--days-ahead", type=int, help="Override FETCH_DAYS_AHEAD")
     p.add_argument("--limit", type=int, help="Limit number of fixtures to fetch/analyze")
+    
+    # ML model training options
+    p.add_argument("--train-models", action="store_true", help="Train ML models on historical data")
+    p.add_argument("--train-from", type=str, help="Training start date (YYYY-MM-DD)")
+    p.add_argument("--train-to", type=str, help="Training end date (YYYY-MM-DD)")
+    p.add_argument("--leagues", type=str, help="Comma-separated league IDs for training (default: 39,61)")
+    
+    # ML prediction option
+    p.add_argument("--use-ml", action="store_true", help="Use ML models for predictions (if available)")
+    
     return p.parse_args()
 
 def main():
