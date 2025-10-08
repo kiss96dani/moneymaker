@@ -3,6 +3,12 @@ import math
 import os
 from collections import defaultdict
 
+try:
+    import numpy as np
+    NUMPY_AVAILABLE = True
+except ImportError:
+    NUMPY_AVAILABLE = False
+
 HOME_ADV = float(os.getenv("HOME_ADV", "0.20"))
 BANKROLL_DAILY = float(os.getenv("BANKROLL_DAILY", "1000"))
 
@@ -36,6 +42,66 @@ def _calculate_form_score(form_string: str) -> float:
         total_weight += w
     
     return score / total_weight if total_weight > 0 else 0.5
+
+def monte_carlo_simulation(lambda_h: float, lambda_a: float, iters: int = 10000) -> Dict[str, any]:
+    """
+    Perform Monte Carlo simulation using Poisson sampling for match outcomes.
+    
+    Args:
+        lambda_h: Home team expected goals (lambda parameter)
+        lambda_a: Away team expected goals (lambda parameter)
+        iters: Number of simulations to run (default: 10000)
+    
+    Returns:
+        Dictionary containing:
+        - Empirical probabilities for 1X2, BTTS, Over/Under 2.5
+        - Total goals distribution quantiles (5, 25, 50, 75, 95 percentiles)
+    """
+    if not NUMPY_AVAILABLE:
+        raise ImportError("NumPy is required for Monte Carlo simulation")
+    
+    # Sample goals from Poisson distributions
+    home_goals = np.random.poisson(lambda_h, iters)
+    away_goals = np.random.poisson(lambda_a, iters)
+    
+    # Calculate outcomes
+    home_wins = np.sum(home_goals > away_goals)
+    draws = np.sum(home_goals == away_goals)
+    away_wins = np.sum(home_goals < away_goals)
+    
+    # BTTS (Both Teams To Score)
+    btts_yes = np.sum((home_goals > 0) & (away_goals > 0))
+    
+    # Over/Under 2.5
+    total_goals = home_goals + away_goals
+    over25 = np.sum(total_goals > 2.5)
+    
+    # Calculate probabilities
+    p_home = home_wins / iters
+    p_draw = draws / iters
+    p_away = away_wins / iters
+    p_btts_yes = btts_yes / iters
+    p_over25 = over25 / iters
+    
+    # Calculate total goals quantiles
+    quantiles = np.percentile(total_goals, [5, 25, 50, 75, 95])
+    
+    return {
+        "home": round(float(p_home), 4),
+        "draw": round(float(p_draw), 4),
+        "away": round(float(p_away), 4),
+        "btts_yes": round(float(p_btts_yes), 4),
+        "btts_no": round(float(1.0 - p_btts_yes), 4),
+        "over25": round(float(p_over25), 4),
+        "under25": round(float(1.0 - p_over25), 4),
+        "total_goals_quantiles": {
+            "p5": round(float(quantiles[0]), 2),
+            "p25": round(float(quantiles[1]), 2),
+            "p50": round(float(quantiles[2]), 2),
+            "p75": round(float(quantiles[3]), 2),
+            "p95": round(float(quantiles[4]), 2),
+        }
+    }
 
 class Predictor:
     def __init__(self, use_ml: bool = False):
@@ -78,13 +144,16 @@ class Predictor:
         lambda_a: float, 
         max_goals: int = 6,
         home_form: Optional[Dict] = None,
-        away_form: Optional[Dict] = None
+        away_form: Optional[Dict] = None,
+        use_mc: bool = False,
+        mc_iters: int = 10000
     ) -> Tuple[Dict[str, float], List[List[float]]]:
         """
         Compute full score probability matrix up to max_goals each,
         then aggregate to 1X2, BTTS and Over/Under 2.5.
         
         If ML mode is enabled and models are available, uses ML predictions.
+        If use_mc is True and NumPy is available, uses Monte Carlo simulation.
         Otherwise falls back to Poisson distribution.
         
         Args:
@@ -93,6 +162,8 @@ class Predictor:
             max_goals: Maximum goals to consider in Poisson
             home_form: Home team form data (for ML mode)
             away_form: Away team form data (for ML mode)
+            use_mc: Whether to use Monte Carlo simulation (default: False)
+            mc_iters: Number of Monte Carlo iterations (default: 10000)
         """
         # Try ML prediction if enabled
         if self.use_ml and self.ml_model and self.ml_model.is_available():
@@ -112,6 +183,17 @@ class Predictor:
                     # Still compute matrix for compatibility
                     matrix = [[0.0]*(max_goals+1) for _ in range(max_goals+1)]
                     return ml_probs, matrix
+        
+        # Try Monte Carlo simulation if requested and available
+        if use_mc and NUMPY_AVAILABLE:
+            try:
+                mc_probs = monte_carlo_simulation(lambda_h, lambda_a, mc_iters)
+                # Still compute matrix for compatibility
+                matrix = [[0.0]*(max_goals+1) for _ in range(max_goals+1)]
+                return mc_probs, matrix
+            except Exception as e:
+                from utils import log
+                log("WARNING", f"Monte Carlo simulation failed: {e}, falling back to Poisson")
         
         # Fallback to Poisson distribution
         # build distributions
