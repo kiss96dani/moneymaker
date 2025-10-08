@@ -1,19 +1,23 @@
 ```markdown
 # moneymaker — Automated Betting Analysis (API-Football)
 
-Ez a projekt egy alapvető, kiterjeszthető fogadási elemző rendszer, amely az API-Football v3-at használja valós idejű mérkőzés- és statisztikai adatokhoz, majd Poisson alapú modellekkel becsli a kimeneteleket.
+Ez a projekt egy alapvető, kiterjeszthető fogadási elemző rendszer, amely az API-Football v3-at használja valós idejű mérkőzés- és statisztikai adatokhoz. A rendszer támogatja mind a Poisson alapú, mind a gépi tanulás alapú előrejelzéseket.
 
 Fő cél:
 - valós forma számítás (utolsó lezárt meccsek alapján)
 - Poisson alapú lambda számítás és 1X2, BTTS, Over/Under becslés
+- **ML alapú előrejelzések** LogisticRegression modellekkel (1X2, BTTS, Over/Under 2.5)
 - Edge és Kelly alapú kockázatkezelési javaslat
-- Később bővíthető kalibrációval, Bayesian modellekkel, és TippmixPro integrációval
+- Automatikus fallback Poisson-ra ha ML modellek nem elérhetők
+- Továbbfejleszthető kalibrációval, Bayesian modellekkel, és TippmixPro integrációval
 
 Követelmények
 - Python 3.10+
 - API-Football kulcs (https://www.api-football.com/documentation-v3)
-- Ajánlott:
+- Telepítés:
+  ```bash
   pip install -r requirements.txt
+  ```
 
 Telepítés
 1. Klónozd a repót:
@@ -23,20 +27,88 @@ Telepítés
    pip install -r requirements.txt
 
 Használat
+
+## Alapvető elemzés (Poisson módszerrel)
 - Mérkőzések letöltése és elemzése:
+  ```bash
   python betting.py --fetch --analyze
+  ```
 
 - Csak elemzés meglévő adatokon:
+  ```bash
   python betting.py --analyze
+  ```
 
 - Konkrét fixture-ök elemzése:
+  ```bash
   python betting.py --analyze --fixture-ids 12345,67890
+  ```
+
+## ML modellek használata
+
+### 1. Modellek betanítása
+Első lépésként történeti adatokon kell betanítani a modelleket:
+
+```bash
+python betting.py --train-models --train-from 2023-01-01 --train-to 2023-12-31 --leagues 39,61
+```
+
+Paraméterek:
+- `--train-models`: ML modellek betanítása
+- `--train-from`: Kezdő dátum (YYYY-MM-DD)
+- `--train-to`: Végző dátum (YYYY-MM-DD)
+- `--leagues`: Liga ID-k vesszővel elválasztva (alapértelmezett: 39,61 - Premier League, Ligue 1)
+
+**Fontos:** A training sok API hívást generál. Javasolt kisebb időszakkal kezdeni (pl. 6-12 hónap) és limitált liga számmal.
+
+### 2. Elemzés ML modellekkel
+Miután a modellek betanultak, elemzéskor használhatod őket:
+
+```bash
+python betting.py --fetch --analyze --use-ml
+```
+
+vagy
+
+```bash
+python betting.py --analyze --fixture-ids 12345,67890 --use-ml
+```
+
+Ha a modellek nem találhatók vagy hiba történik, automatikusan visszavált Poisson módszerre.
 
 Kimenet
 - data/fixtures/: raw fixture JSON fájlok
 - data/analysis/: elemzési eredmények JSON fájlok
 - config/: konfigurációs adatok (pl. ligák listája)
+- models/: betanított ML modellek (*.pkl fájlok)
+
+## ML Pipeline technikai részletek
+
+### Feature-ök
+A ML modellek a következő feature-öket használják:
+- `home_goals_per_match`: hazai csapat átlag góljai (utolsó 5 meccs)
+- `home_goals_against_per_match`: hazai csapat kapott gólok átlaga
+- `away_goals_per_match`: vendég csapat átlag góljai
+- `away_goals_against_per_match`: vendég csapat kapott gólok átlaga
+- `form_score_home`: súlyozott forma érték (W=1, D=0.5, L=0)
+- `form_score_away`: vendég forma érték
+- `home_adv`: hazai pálya előny konstans
+
+### Modellek
+- **1X2 model**: Multinomial LogisticRegression (3 osztály: home/draw/away)
+- **BTTS model**: Binary LogisticRegression (2 osztály: yes/no)
+- **Over/Under 2.5 model**: Binary LogisticRegression (2 osztály: over/under)
+
+### Odds parsing és edge számítás
+A rendszer kiterjesztett odds parsing-ot használ:
+- 1X2 piac: home/draw/away odds
+- BTTS piac: yes/no odds
+- Over/Under 2.5 piac: over/under odds
+
+Edge és Kelly stake minden piacon:
+- Edge = model_prob × odds - 1
+- Kelly = edge / (odds - 1) ha edge > 0
 
 Megjegyzés
-Ez a kiinduló kód alapvető implementációt ad; az "enhanced modeling" (kalibráció, Bayes, Monte Carlo) és a TippmixPro/Tippmix integráció további implementációt igényel. A parserek a bookmakerek odds-ainak heterogén alakjai miatt egyszerűsítettek — a valós odds-források feldolgozásához kiterjesztés szükséges.
+Ez a rendszer production-ready ML pipeline-t biztosít Poisson fallback-kel. Az "enhanced modeling" (kalibráció, Bayes, Monte Carlo) és a TippmixPro/Tippmix integráció továbbfejleszthető. A training sok API hívást generál - javasolt retry/backoff mechanizmus használata production környezetben.
 ```

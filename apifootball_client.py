@@ -71,4 +71,31 @@ class APIFootballClient:
         res = await self._get("/leagues")
         return res
 
+    async def get_fixtures_by_league_and_date(
+        self, 
+        league_id: int, 
+        from_date: str, 
+        to_date: str
+    ) -> List[dict]:
+        """
+        Get fixtures for a specific league within a date range.
+        
+        Args:
+            league_id: League ID
+            from_date: Start date (YYYY-MM-DD)
+            to_date: End date (YYYY-MM-DD)
+            
+        Returns:
+            List of fixture dictionaries
+        """
+        res = await self._get(
+            "/fixtures", 
+            params={
+                "league": league_id,
+                "from": from_date,
+                "to": to_date
+            }
+        )
+        return res.get("response", [])
+
     # Note: add more helper methods as needed for players/injuries/... later.

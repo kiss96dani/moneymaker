@@ -1,4 +1,4 @@
-from typing import Dict, Tuple, List
+from typing import Dict, Tuple, List, Optional
 import math
 import os
 from collections import defaultdict
@@ -13,9 +13,56 @@ def _poisson_pmf(l: float, k: int) -> float:
     except OverflowError:
         return 0.0
 
+def _calculate_form_score(form_string: str) -> float:
+    """
+    Calculate weighted form score from result string.
+    W=1, D=0.5, L=0. Recent matches weighted more.
+    """
+    if not form_string:
+        return 0.5
+    
+    weights = [0.6, 0.7, 0.8, 0.9, 1.0]  # More recent = higher weight
+    score = 0.0
+    total_weight = 0.0
+    
+    # Reverse to process oldest to newest
+    results = list(reversed(form_string[-5:]))
+    for i, res in enumerate(results):
+        w = weights[min(i, len(weights) - 1)]
+        if res == 'W':
+            score += 1.0 * w
+        elif res == 'D':
+            score += 0.5 * w
+        total_weight += w
+    
+    return score / total_weight if total_weight > 0 else 0.5
+
 class Predictor:
-    def __init__(self):
-        pass
+    def __init__(self, use_ml: bool = False):
+        """
+        Initialize Predictor with optional ML mode.
+        
+        Args:
+            use_ml: If True, attempt to use ML models for predictions
+        """
+        self.use_ml = use_ml
+        self.ml_model = None
+        
+        if use_ml:
+            try:
+                from models.model_wrapper import ModelWrapper
+                self.ml_model = ModelWrapper()
+                if self.ml_model.load_models():
+                    from utils import log
+                    log("INFO", "Predictor initialized with ML models")
+                else:
+                    self.ml_model = None
+                    from utils import log
+                    log("WARNING", "ML models not available, falling back to Poisson")
+            except Exception as e:
+                from utils import log
+                log("WARNING", f"Failed to initialize ML models: {e}, using Poisson fallback")
+                self.ml_model = None
 
     def compute_lambdas(self, home_recent: Dict, away_recent: Dict) -> Tuple[float, float]:
         # A simple lambda calculation using goals_per_match and home advantage
@@ -25,11 +72,48 @@ class Predictor:
         lambda_a = max(0.01, ga)
         return round(lambda_h, 3), round(lambda_a, 3)
 
-    def match_probabilities(self, lambda_h: float, lambda_a: float, max_goals: int = 6) -> Tuple[Dict[str, float], List[List[float]]]:
+    def match_probabilities(
+        self, 
+        lambda_h: float, 
+        lambda_a: float, 
+        max_goals: int = 6,
+        home_form: Optional[Dict] = None,
+        away_form: Optional[Dict] = None
+    ) -> Tuple[Dict[str, float], List[List[float]]]:
         """
         Compute full score probability matrix up to max_goals each,
         then aggregate to 1X2, BTTS and Over/Under 2.5.
+        
+        If ML mode is enabled and models are available, uses ML predictions.
+        Otherwise falls back to Poisson distribution.
+        
+        Args:
+            lambda_h: Home team lambda (expected goals)
+            lambda_a: Away team lambda (expected goals)
+            max_goals: Maximum goals to consider in Poisson
+            home_form: Home team form data (for ML mode)
+            away_form: Away team form data (for ML mode)
         """
+        # Try ML prediction if enabled
+        if self.use_ml and self.ml_model and self.ml_model.is_available():
+            if home_form and away_form:
+                features = {
+                    'home_goals_per_match': home_form.get('goals_per_match', lambda_h),
+                    'home_goals_against_per_match': home_form.get('goals_against_per_match', 1.0),
+                    'away_goals_per_match': away_form.get('goals_per_match', lambda_a),
+                    'away_goals_against_per_match': away_form.get('goals_against_per_match', 1.0),
+                    'form_score_home': _calculate_form_score(home_form.get('form_string', '')),
+                    'form_score_away': _calculate_form_score(away_form.get('form_string', '')),
+                    'home_adv': HOME_ADV
+                }
+                
+                ml_probs = self.ml_model.predict_proba(features)
+                if ml_probs:
+                    # Still compute matrix for compatibility
+                    matrix = [[0.0]*(max_goals+1) for _ in range(max_goals+1)]
+                    return ml_probs, matrix
+        
+        # Fallback to Poisson distribution
         # build distributions
         hd = [_poisson_pmf(lambda_h, k) for k in range(0, max_goals+1)]
         ad = [_poisson_pmf(lambda_a, k) for k in range(0, max_goals+1)]
@@ -78,15 +162,12 @@ class Predictor:
 
     def parse_market_odds(self, odds_response: List[dict]) -> Dict:
         """
-        Simplified parsing: try to find common bookmakers and odds for 1X2, BTTS and O/U 2.5
-        Returns a dict with market probabilities (converted from decimal odds).
+        Parse bookmaker odds for 1X2, BTTS and O/U 2.5 markets.
+        Returns dict with market_odds (decimal odds) and market_probs (implied probabilities).
         """
-        markets = {}
-        # odds_response format: list of bookmakers each with bets -> contains bookmakers[].bets[].values[]
-        for book in odds_response:
-            for b in book.get("bookmakers", book.get("bookmaker", [])) if False else []:
-                pass
-        # The actual API structure is nested; we'll attempt to extract commonly available markets
+        market_odds = {}
+        
+        # odds_response format: list of objects with bookmakers[].bets[].values[]
         for venue in odds_response:
             # accommodate different shapes
             bookmakers = []
@@ -98,76 +179,167 @@ class Predictor:
                 bookmakers = [venue]
 
             for bm in bookmakers:
-                for bet in bm.get("bets", bm.get("values", [])):
-                    label = bet.get("name") or bet.get("label") or ""
-                    if "1X2" in label.upper() or "MATCH ODDS" in label.upper():
-                        for v in bet.get("values", bet.get("values", [])):
-                            key = v.get("value", "") or v.get("odd", "")
-                            odd = v.get("odd") or v.get("value")
-                            # skip if impossible shape
-                    if "BTTS" in label.upper() or "BOTH" in label.upper():
+                for bet in bm.get("bets", []):
+                    label = bet.get("name", "") or bet.get("label", "")
+                    
+                    # Parse 1X2 odds
+                    if "1X2" in label.upper() or "MATCH WINNER" in label.upper() or "MATCH ODDS" in label.upper():
                         for v in bet.get("values", []):
-                            key = v.get("value", "").lower()
+                            value_key = (v.get("value", "") or "").strip()
                             odd = v.get("odd")
+                            
                             if not odd:
                                 continue
+                            
                             try:
                                 odd_f = float(odd)
-                                if "yes" in key or "y" == key:
-                                    markets.setdefault("btts_yes_odds", odd_f)
-                                elif "no" in key:
-                                    markets.setdefault("btts_no_odds", odd_f)
-                            except Exception:
+                                if value_key == "Home" or value_key == "1":
+                                    market_odds.setdefault("home_odds", odd_f)
+                                elif value_key == "Draw" or value_key == "X":
+                                    market_odds.setdefault("draw_odds", odd_f)
+                                elif value_key == "Away" or value_key == "2":
+                                    market_odds.setdefault("away_odds", odd_f)
+                            except (ValueError, TypeError):
                                 continue
-                    if "OVER/UNDER" in label.upper() or "TOTAL" in label.upper():
+                    
+                    # Parse BTTS odds
+                    if "BTTS" in label.upper() or "BOTH TEAMS TO SCORE" in label.upper():
                         for v in bet.get("values", []):
-                            key = v.get("value", "").lower()
+                            value_key = (v.get("value", "") or "").lower()
                             odd = v.get("odd")
-                            if "2.5" in key and odd:
+                            
+                            if not odd:
+                                continue
+                            
+                            try:
+                                odd_f = float(odd)
+                                if "yes" in value_key or value_key == "y":
+                                    market_odds.setdefault("btts_yes_odds", odd_f)
+                                elif "no" in value_key or value_key == "n":
+                                    market_odds.setdefault("btts_no_odds", odd_f)
+                            except (ValueError, TypeError):
+                                continue
+                    
+                    # Parse Over/Under 2.5 odds
+                    if "OVER/UNDER" in label.upper() or "GOALS OVER/UNDER" in label.upper():
+                        for v in bet.get("values", []):
+                            value_key = (v.get("value", "") or "").lower()
+                            odd = v.get("odd")
+                            
+                            if "2.5" in value_key and odd:
                                 try:
                                     odd_f = float(odd)
-                                    if "over" in key:
-                                        markets.setdefault("over25_odds", odd_f)
-                                    elif "under" in key:
-                                        markets.setdefault("under25_odds", odd_f)
-                                except Exception:
+                                    if "over" in value_key:
+                                        market_odds.setdefault("over25_odds", odd_f)
+                                    elif "under" in value_key:
+                                        market_odds.setdefault("under25_odds", odd_f)
+                                except (ValueError, TypeError):
                                     continue
+        
         # Convert odds to implied probabilities
         market_probs = {}
-        if markets.get("btts_yes_odds"):
-            market_probs["btts_yes"] = round(1.0 / markets["btts_yes_odds"], 4)
-            market_probs["btts_no"] = round(1.0 - market_probs["btts_yes"], 4)
-        if markets.get("over25_odds"):
-            market_probs["over25"] = round(1.0 / markets["over25_odds"], 4)
-            market_probs["under25"] = round(1.0 - market_probs["over25"], 4)
-        # Note: 1X2 odds parsing is complex; we leave it for extended implementation.
-        return market_probs
+        
+        # 1X2 probabilities
+        if all(k in market_odds for k in ["home_odds", "draw_odds", "away_odds"]):
+            market_probs["home"] = round(1.0 / market_odds["home_odds"], 4)
+            market_probs["draw"] = round(1.0 / market_odds["draw_odds"], 4)
+            market_probs["away"] = round(1.0 / market_odds["away_odds"], 4)
+        
+        # BTTS probabilities
+        if "btts_yes_odds" in market_odds:
+            market_probs["btts_yes"] = round(1.0 / market_odds["btts_yes_odds"], 4)
+        if "btts_no_odds" in market_odds:
+            market_probs["btts_no"] = round(1.0 / market_odds["btts_no_odds"], 4)
+        
+        # Over/Under 2.5 probabilities
+        if "over25_odds" in market_odds:
+            market_probs["over25"] = round(1.0 / market_odds["over25_odds"], 4)
+        if "under25_odds" in market_odds:
+            market_probs["under25"] = round(1.0 / market_odds["under25_odds"], 4)
+        
+        # Return both odds and probabilities
+        return {
+            "market_odds": market_odds,
+            "market_probs": market_probs
+        }
 
-    def compute_edges_and_kelly(self, model_probs: Dict[str, float], market_probs: Dict[str, float], market_odds: Dict[str, float] = None) -> Dict:
+    def compute_edges_and_kelly(self, model_probs: Dict[str, float], market_data: Dict) -> Dict:
         """
-        For each market available in market_probs, compute edge and Kelly stake %.
-        edge = model_prob * odds - 1   (per provided spec)
+        For each market available, compute edge and Kelly stake %.
+        edge = model_prob * odds - 1
         kelly = edge / (odds - 1) if odds>1 and edge>0 else 0
+        
+        Args:
+            model_probs: Model predicted probabilities
+            market_data: Dict with 'market_odds' and 'market_probs' from parse_market_odds
         """
         res = {}
-        # Expect market_probs contain implied probs; for Kelly we need odds. Try infer odds from probs if not provided.
-        for m in ["btts_yes", "over25"]:
-            if m in model_probs and m in market_probs:
-                implied = market_probs[m]
-                if implied <= 0:
-                    continue
-                odds = (1.0 / implied) if implied > 0 else None
-                model_p = model_probs[m]
-                if odds and odds > 1:
+        
+        # Handle both old and new format
+        market_odds = market_data.get("market_odds", {})
+        market_probs = market_data.get("market_probs", market_data)  # Fallback for old format
+        
+        # Process 1X2 markets
+        for outcome in ["home", "draw", "away"]:
+            odds_key = f"{outcome}_odds"
+            if outcome in model_probs and odds_key in market_odds:
+                odds = market_odds[odds_key]
+                model_p = model_probs[outcome]
+                
+                if odds > 1.0:
                     edge = model_p * odds - 1.0
                     kelly = (edge / (odds - 1.0)) if (odds - 1.0) > 0 and edge > 0 else 0.0
                     stake = round(max(0.0, min(1.0, kelly)) * BANKROLL_DAILY, 2)
-                    res[m] = {
-                        "market_prob": round(implied, 4),
+                    
+                    res[outcome] = {
+                        "market_prob": round(1.0 / odds, 4),
                         "model_prob": round(model_p, 4),
                         "odds": round(odds, 3),
                         "edge": round(edge, 4),
                         "kelly_frac": round(kelly, 4),
                         "stake_recom": stake,
                     }
+        
+        # Process BTTS markets
+        for outcome in ["btts_yes", "btts_no"]:
+            odds_key = outcome + "_odds"
+            if outcome in model_probs and odds_key in market_odds:
+                odds = market_odds[odds_key]
+                model_p = model_probs[outcome]
+                
+                if odds > 1.0:
+                    edge = model_p * odds - 1.0
+                    kelly = (edge / (odds - 1.0)) if (odds - 1.0) > 0 and edge > 0 else 0.0
+                    stake = round(max(0.0, min(1.0, kelly)) * BANKROLL_DAILY, 2)
+                    
+                    res[outcome] = {
+                        "market_prob": round(1.0 / odds, 4),
+                        "model_prob": round(model_p, 4),
+                        "odds": round(odds, 3),
+                        "edge": round(edge, 4),
+                        "kelly_frac": round(kelly, 4),
+                        "stake_recom": stake,
+                    }
+        
+        # Process Over/Under 2.5 markets
+        for outcome in ["over25", "under25"]:
+            odds_key = outcome + "_odds"
+            if outcome in model_probs and odds_key in market_odds:
+                odds = market_odds[odds_key]
+                model_p = model_probs[outcome]
+                
+                if odds > 1.0:
+                    edge = model_p * odds - 1.0
+                    kelly = (edge / (odds - 1.0)) if (odds - 1.0) > 0 and edge > 0 else 0.0
+                    stake = round(max(0.0, min(1.0, kelly)) * BANKROLL_DAILY, 2)
+                    
+                    res[outcome] = {
+                        "market_prob": round(1.0 / odds, 4),
+                        "model_prob": round(model_p, 4),
+                        "odds": round(odds, 3),
+                        "edge": round(edge, 4),
+                        "kelly_frac": round(kelly, 4),
+                        "stake_recom": stake,
+                    }
+        
         return res

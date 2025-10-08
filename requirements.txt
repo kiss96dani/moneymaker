@@ -1,7 +1,7 @@
 aiohttp
 pillow
-# optional
-# numpy
-# scikit-learn
-# pymc
-# matplotlib
+python-dotenv
+numpy
+pandas
+scikit-learn
+joblib
