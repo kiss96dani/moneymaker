@@ -203,7 +203,7 @@ class Predictor:
                                 continue
                     
                     # Parse BTTS odds
-                    if "BTTS" in label.upper() or "BOTH TEAMS TO SCORE" in label.upper():
+                    if "BTTS" in label.upper() or "BOTH TEAMS" in label.upper() or "BOTH TEAMS TO SCORE" in label.upper():
                         for v in bet.get("values", []):
                             value_key = (v.get("value", "") or "").lower()
                             odd = v.get("odd")
