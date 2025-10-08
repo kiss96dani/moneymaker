@@ -60,7 +60,7 @@ async def fetch_fixtures(client: APIFootballClient, days_ahead: int, limit: Opti
                 return fixtures
     return fixtures
 
-async def analyze_fixtures(client: APIFootballClient, fixture_ids: Optional[List[int]] = None, limit: Optional[int]=None, use_ml: bool = False):
+async def analyze_fixtures(client: APIFootballClient, fixture_ids: Optional[List[int]] = None, limit: Optional[int]=None, use_ml: bool = False, use_mc: bool = False):
     # Analyzer currently doesn't require client; instantiate accordingly
     analyzer = Analyzer()
     predictor = Predictor()
@@ -96,12 +96,34 @@ async def analyze_fixtures(client: APIFootballClient, fixture_ids: Optional[List
             home_form = analyzer.calculate_last_n_form(home_recent, team_id=home_team, n=5)
             away_form = analyzer.calculate_last_n_form(away_recent, team_id=away_team, n=5)
 
+            # Get head-to-head data
+            h2h_fixtures = await client.get_head_to_head(home_team, away_team, last=10)
+            h2h_summary = []
+            for h2h_fix in h2h_fixtures[:10]:  # Limit to last 10
+                h2h_teams = h2h_fix.get("teams", {})
+                h2h_goals = h2h_fix.get("goals", {})
+                h2h_fixture_info = h2h_fix.get("fixture", {})
+                h2h_summary.append({
+                    "fixture_id": h2h_fixture_info.get("id"),
+                    "date": h2h_fixture_info.get("date"),
+                    "home_team": h2h_teams.get("home", {}).get("name"),
+                    "away_team": h2h_teams.get("away", {}).get("name"),
+                    "home_goals": h2h_goals.get("home"),
+                    "away_goals": h2h_goals.get("away"),
+                })
+
             lambda_h, lambda_a = predictor.compute_lambdas(home_form, away_form)
 
-            # predictor may later accept use_ml flag; for now pass it along if supported
+            # Pass use_mc flag to predictor
             try:
-                model_probs, matrix = predictor.match_probabilities(lambda_h, lambda_a, use_ml=use_ml)  # predictor may ignore extra arg
+                model_probs, matrix = predictor.match_probabilities(
+                    lambda_h, lambda_a, 
+                    home_form=home_form, 
+                    away_form=away_form,
+                    use_mc=use_mc
+                )
             except TypeError:
+                # Fallback for older predictor signature
                 model_probs, matrix = predictor.match_probabilities(lambda_h, lambda_a)
 
             market = {}
@@ -111,9 +133,14 @@ async def analyze_fixtures(client: APIFootballClient, fixture_ids: Optional[List
 
             edge_kelly = predictor.compute_edges_and_kelly(model_probs, market)
 
+            # Import timezone conversion utility
+            from utils import to_local_time
+            kickoff_local = to_local_time(fixture_meta["kickoff_utc"])
+
             analysis = {
                 "fixture_id": fixture_meta["fixture_id"],
                 "kickoff_utc": fixture_meta["kickoff_utc"],
+                "kickoff_local": kickoff_local,
                 "league_id": fixture_meta["league_id"],
                 "league_name": fixture_meta["league_name"],
                 "home_team": fixture_meta["home_team_name"],
@@ -125,6 +152,7 @@ async def analyze_fixtures(client: APIFootballClient, fixture_ids: Optional[List
                 "edge_kelly": edge_kelly,
                 "home_recent": home_form,
                 "away_recent": away_form,
+                "h2h": h2h_summary,
             }
 
             results.append(analysis)
@@ -159,7 +187,7 @@ async def main_async(args):
             fids = None
             if args.fixture_ids:
                 fids = [int(x.strip()) for x in args.fixture_ids.split(",") if x.strip().isdigit()]
-            results = await analyze_fixtures(client, fixture_ids=fids, limit=args.limit, use_ml=args.use_ml)
+            results = await analyze_fixtures(client, fixture_ids=fids, limit=args.limit, use_ml=args.use_ml, use_mc=args.use_mc)
             log("INFO", f"Completed analysis for {len(results)} fixtures")
 
             # Print full analysis JSON (existing behaviour)
@@ -193,6 +221,7 @@ def parse_args():
     p.add_argument("--days-ahead", type=int, help="Override FETCH_DAYS_AHEAD")
     p.add_argument("--limit", type=int, help="Limit number of fixtures to fetch/analyze")
     p.add_argument("--use-ml", action="store_true", help="Use ML models if available (fallback to Poisson if not)")
+    p.add_argument("--use-mc", action="store_true", help="Use Monte Carlo simulation for probability calculations")
     return p.parse_args()
 
 def main():

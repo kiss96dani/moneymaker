@@ -15,14 +15,16 @@ from typing import List, Dict, Any
 from pathlib import Path
 
 def _fixture_brief(r: Dict[str, Any]):
-    return {
+    brief = {
         "fixture_id": r.get("fixture_id"),
         "kickoff_utc": r.get("kickoff_utc"),
+        "kickoff_local": r.get("kickoff_local"),
         "league_id": r.get("league_id"),
         "league_name": r.get("league_name"),
         "home_team": r.get("home_team"),
         "away_team": r.get("away_team"),
     }
+    return brief
 
 def summarize_results(results: List[Dict[str, Any]], top_n: int = 3) -> Dict[str, Any]:
     # collectors
@@ -33,6 +35,9 @@ def summarize_results(results: List[Dict[str, Any]], top_n: int = 3) -> Dict[str
     for r in results:
         mp = r.get("model_probs", {})
         brief = _fixture_brief(r)
+        edge_kelly = r.get("edge_kelly", {})
+        market = r.get("market", {})
+        market_odds = market.get("market_odds", {})
 
         # 1X2: choose strongest side
         home_p = mp.get("home")
@@ -47,12 +52,25 @@ def summarize_results(results: List[Dict[str, Any]], top_n: int = 3) -> Dict[str
             if away_p > best_prob:
                 best_side = "away"
                 best_prob = away_p
-            one_x_two_candidates.append({
+            
+            # Get edge/Kelly info for the chosen outcome
+            ek_info = edge_kelly.get(best_side, {})
+            tip_data = {
                 **brief,
                 "chosen_outcome": best_side,
                 "probability": round(float(best_prob), 4),
                 "source": "model_probs"
-            })
+            }
+            
+            # Add market odds and edge info if available
+            if ek_info:
+                tip_data["market_odds"] = ek_info.get("odds")
+                tip_data["implied_prob"] = ek_info.get("market_prob")
+                tip_data["edge"] = ek_info.get("edge")
+                tip_data["kelly_frac"] = ek_info.get("kelly_frac")
+                tip_data["stake_recom"] = ek_info.get("stake_recom")
+            
+            one_x_two_candidates.append(tip_data)
 
         # BTTS: choose stronger side
         btts_yes = mp.get("btts_yes")
@@ -64,12 +82,25 @@ def summarize_results(results: List[Dict[str, Any]], top_n: int = 3) -> Dict[str
             else:
                 chosen = "btts_no"
                 prob = btts_no
-            btts_candidates.append({
+            
+            # Get edge/Kelly info for the chosen outcome
+            ek_info = edge_kelly.get(chosen, {})
+            tip_data = {
                 **brief,
                 "chosen_outcome": chosen,
                 "probability": round(float(prob), 4),
                 "source": "model_probs"
-            })
+            }
+            
+            # Add market odds and edge info if available
+            if ek_info:
+                tip_data["market_odds"] = ek_info.get("odds")
+                tip_data["implied_prob"] = ek_info.get("market_prob")
+                tip_data["edge"] = ek_info.get("edge")
+                tip_data["kelly_frac"] = ek_info.get("kelly_frac")
+                tip_data["stake_recom"] = ek_info.get("stake_recom")
+            
+            btts_candidates.append(tip_data)
 
         # Over/Under 2.5: choose stronger side
         over = mp.get("over25")
@@ -81,12 +112,25 @@ def summarize_results(results: List[Dict[str, Any]], top_n: int = 3) -> Dict[str
             else:
                 chosen = "under25"
                 prob = under
-            over_candidates.append({
+            
+            # Get edge/Kelly info for the chosen outcome
+            ek_info = edge_kelly.get(chosen, {})
+            tip_data = {
                 **brief,
                 "chosen_outcome": chosen,
                 "probability": round(float(prob), 4),
                 "source": "model_probs"
-            })
+            }
+            
+            # Add market odds and edge info if available
+            if ek_info:
+                tip_data["market_odds"] = ek_info.get("odds")
+                tip_data["implied_prob"] = ek_info.get("market_prob")
+                tip_data["edge"] = ek_info.get("edge")
+                tip_data["kelly_frac"] = ek_info.get("kelly_frac")
+                tip_data["stake_recom"] = ek_info.get("stake_recom")
+            
+            over_candidates.append(tip_data)
 
     # sort and pick top_n
     one_x_two_sorted = sorted(one_x_two_candidates, key=lambda x: x["probability"], reverse=True)[:top_n]
@@ -112,7 +156,19 @@ def summarize_results(results: List[Dict[str, Any]], top_n: int = 3) -> Dict[str
             return
         for i, it in enumerate(items, start=1):
             teams = f"{it['home_team']} vs {it['away_team']}"
-            print(f"  {i}. {teams} ({it['league_name']}) - {it['chosen_outcome']} @ {it['probability']*100:.1f}% [fixture {it['fixture_id']}]")
+            prob_str = f"{it['probability']*100:.1f}%"
+            
+            # Add market odds and edge info if available
+            extra_info = []
+            if it.get("market_odds"):
+                extra_info.append(f"odds: {it['market_odds']:.2f}")
+            if it.get("edge") is not None:
+                extra_info.append(f"edge: {it['edge']:.2%}")
+            if it.get("kelly_frac") is not None:
+                extra_info.append(f"kelly: {it['kelly_frac']:.2%}")
+            
+            extra_str = f" ({', '.join(extra_info)})" if extra_info else ""
+            print(f"  {i}. {teams} ({it['league_name']}) - {it['chosen_outcome']} @ {prob_str}{extra_str} [fixture {it['fixture_id']}]")
 
     _print_section("1X2 (best single outcome per fixture)", one_x_two_sorted)
     _print_section("BTTS (best side per fixture)", btts_sorted)

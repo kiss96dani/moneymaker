@@ -98,4 +98,33 @@ class APIFootballClient:
         )
         return res.get("response", [])
 
+    async def get_head_to_head(self, team1_id: int, team2_id: int, last: int = 10) -> List[dict]:
+        """
+        Get head-to-head fixtures between two teams.
+        
+        Args:
+            team1_id: First team ID
+            team2_id: Second team ID
+            last: Number of last H2H matches to retrieve (default: 10)
+            
+        Returns:
+            List of H2H fixture dictionaries sorted by date
+        """
+        # API endpoint: /fixtures?h2h={team1}-{team2}&last={last}
+        h2h_param = f"{team1_id}-{team2_id}"
+        res = await self._get("/fixtures", params={"h2h": h2h_param, "last": last})
+        fixtures = res.get("response", [])
+        
+        # Sort by date to ensure consistent ordering (newest first from API, but let's verify)
+        try:
+            fixtures_sorted = sorted(
+                fixtures, 
+                key=lambda x: x.get("fixture", {}).get("date", ""), 
+                reverse=True
+            )
+            return fixtures_sorted
+        except Exception as e:
+            log("WARNING", f"Failed to sort H2H fixtures: {e}")
+            return fixtures
+
     # Note: add more helper methods as needed for players/injuries/... later.

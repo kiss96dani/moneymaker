@@ -44,6 +44,14 @@ Használat
   python betting.py --analyze --fixture-ids 12345,67890
   ```
 
+## Monte Carlo szimuláció
+- Mérkőzések elemzése Monte Carlo Poisson-szimulációval (jobb megbízhatóság):
+  ```bash
+  python betting.py --fetch --analyze --use-mc
+  ```
+
+A Monte Carlo módszer 10,000 iterációval szimulál véletlenszerű Poisson-mintavételezéssel, és empirikus valószínűségeket számol az 1X2, BTTS és Over/Under 2.5 piacokra. A módszer előnye, hogy robusztusabb becslést ad, főleg szélsőséges lambda értékek esetén.
+
 ## ML modellek használata
 
 ### 1. Modellek betanítása
@@ -79,8 +87,26 @@ Ha a modellek nem találhatók vagy hiba történik, automatikusan visszavált P
 Kimenet
 - data/fixtures/: raw fixture JSON fájlok
 - data/analysis/: elemzési eredmények JSON fájlok
+- daily_reports/: napi top mérkőzések összefoglalók (top_markets_YYYY-MM-DD.json)
 - config/: konfigurációs adatok (pl. ligák listája)
 - models/: betanított ML modellek (*.pkl fájlok)
+
+## Új funkciók
+
+### Head-to-Head (H2H) adatok
+Az elemzések mostantól tartalmazzák az utolsó 10 H2H mérkőzés adatait a két csapat között. Ez az `h2h` mezőben található az analysis JSON-ben.
+
+### Helyi időzóna (Budapest)
+A mérkőzések kezdési ideje mostantól szerepel Budapest időzónában is (`kickoff_local` mező), az UTC mellett.
+
+### Odds és Edge számítás
+Az elemzések tartalmazzák a piaci oddsokat és a számított edge/Kelly értékeket minden elérhető piacon (1X2, BTTS, Over/Under 2.5). A top markets report minden tipp mellé csatolja:
+- Piaci odds
+- Implied probability
+- Edge (model_prob × odds - 1)
+- Kelly ajánlás (fractional Kelly és stake ajánlás)
+
+Az edge számítás csak akkor történik, ha piaci odds elérhető az adott piachoz.
 
 ## ML Pipeline technikai részletek
 
