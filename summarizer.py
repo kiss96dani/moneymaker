@@ -32,11 +32,23 @@ def _fixture_brief(r: Dict[str, Any]):
     }
     return brief
 
-def summarize_results(results: List[Dict[str, Any]], top_n: int = 3) -> Dict[str, Any]:
+def summarize_results(results: List[Dict[str, Any]], top_n: int = 3, require_tippmix: bool = False) -> Dict[str, Any]:
     # collectors
     one_x_two_candidates = []
     btts_candidates = []
     over_candidates = []
+    
+    # Initialize Tippmix lookup if required
+    tippmix_lookup = None
+    if require_tippmix:
+        try:
+            from tippmix_lookup import get_lookup
+            tippmix_lookup = get_lookup()
+            from utils import log
+            log("INFO", "Tippmix filtering enabled")
+        except Exception as e:
+            from utils import log
+            log("WARNING", f"Could not initialize Tippmix lookup: {e}")
 
     for r in results:
         mp = r.get("model_probs", {})
@@ -44,6 +56,13 @@ def summarize_results(results: List[Dict[str, Any]], top_n: int = 3) -> Dict[str
         edge_kelly = r.get("edge_kelly", {})
         market = r.get("market", {})
         market_odds = market.get("market_odds", {})
+        
+        # Check Tippmix availability if required
+        if require_tippmix and tippmix_lookup:
+            home_team = r.get("home_team", "")
+            away_team = r.get("away_team", "")
+            if not tippmix_lookup.is_on_tippmix(home_team, away_team):
+                continue  # Skip this fixture
 
         # 1X2: choose strongest side
         home_p = mp.get("home")

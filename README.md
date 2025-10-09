@@ -44,6 +44,13 @@ Használat
   python betting.py --analyze --fixture-ids 12345,67890
   ```
 
+- Múltbeli mérkőzések is szerepeljenek az elemzésben:
+  ```bash
+  python betting.py --analyze --include-past
+  ```
+
+  Alapértelmezetten csak jövőbeli mérkőzéseket (kickoff > most) elemez.
+
 ## Monte Carlo szimuláció
 - Mérkőzések elemzése Monte Carlo Poisson-szimulációval (jobb megbízhatóság):
   ```bash
@@ -88,6 +95,35 @@ python betting.py --analyze --fixture-ids 12345,67890 --use-ml
 ```
 
 Ha a modellek nem találhatók vagy hiba történik, automatikusan visszavált Poisson módszerre.
+
+## Tippmix integráció
+
+### Tippmix scraper futtatása
+A rendszer képes lescrapelni a Tippmix weboldalról az elérhető fogadási opciókat:
+
+```bash
+python betting.py --tippmix-scrape
+```
+
+Ez elmenti az elérhető mérkőzéseket a `data/tippmix_mappings.json` fájlba.
+
+### Csak Tippmixen elérhető tippek
+Ha csak olyan mérkőzéseket szeretnél elemezni, amelyek elérhetők a Tippmixen:
+
+```bash
+python betting.py --fetch --analyze --require-tippmix
+```
+
+Ez fuzzy matchinget használ (rapidfuzz) a csapatnevek összehasonlításához.
+
+### Kombinált használat
+Scraper futtatása és csak Tippmix mérkőzések elemzése:
+
+```bash
+python betting.py --tippmix-scrape --fetch --analyze --require-tippmix
+```
+
+**Megjegyzés**: A scraper best-effort alapon működik és a Tippmix oldal szerkezetének változásával frissítést igényelhet.
 
 Kimenet
 - data/fixtures/: raw fixture JSON fájlok
