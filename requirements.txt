@@ -7,4 +7,4 @@ scikit-learn
 joblib
 tzdata
 python-dateutil
-backports.zoneinfo
+backports.zoneinfo; python_version < '3.9'
