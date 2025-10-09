@@ -7,12 +7,18 @@ For each fixture:
  - BTTS: pick the stronger side (yes/no) and rank by probability.
  - Over/Under (2.5): pick the stronger side (over/under) and rank by probability.
 
+Only tips with odds >= MIN_ODDS are included in the output.
+
 Returns a dict with three keys: '1x2', 'btts', 'over25', each a list of top entries.
 Each entry contains fixture_id, teams, league, kickoff, chosen_outcome, probability, and source fields.
 """
 from datetime import datetime, timezone
 from typing import List, Dict, Any
 from pathlib import Path
+import os
+
+# Minimum odds threshold for tips (default 1.85)
+MIN_ODDS = float(os.getenv("MIN_ODDS", "1.85"))
 
 def _fixture_brief(r: Dict[str, Any]):
     brief = {
@@ -70,7 +76,9 @@ def summarize_results(results: List[Dict[str, Any]], top_n: int = 3) -> Dict[str
                 tip_data["kelly_frac"] = ek_info.get("kelly_frac")
                 tip_data["stake_recom"] = ek_info.get("stake_recom")
             
-            one_x_two_candidates.append(tip_data)
+            # Only add if odds >= MIN_ODDS (or no odds available)
+            if tip_data.get("market_odds") is None or tip_data["market_odds"] >= MIN_ODDS:
+                one_x_two_candidates.append(tip_data)
 
         # BTTS: choose stronger side
         btts_yes = mp.get("btts_yes")
@@ -100,7 +108,9 @@ def summarize_results(results: List[Dict[str, Any]], top_n: int = 3) -> Dict[str
                 tip_data["kelly_frac"] = ek_info.get("kelly_frac")
                 tip_data["stake_recom"] = ek_info.get("stake_recom")
             
-            btts_candidates.append(tip_data)
+            # Only add if odds >= MIN_ODDS (or no odds available)
+            if tip_data.get("market_odds") is None or tip_data["market_odds"] >= MIN_ODDS:
+                btts_candidates.append(tip_data)
 
         # Over/Under 2.5: choose stronger side
         over = mp.get("over25")
@@ -130,7 +140,9 @@ def summarize_results(results: List[Dict[str, Any]], top_n: int = 3) -> Dict[str
                 tip_data["kelly_frac"] = ek_info.get("kelly_frac")
                 tip_data["stake_recom"] = ek_info.get("stake_recom")
             
-            over_candidates.append(tip_data)
+            # Only add if odds >= MIN_ODDS (or no odds available)
+            if tip_data.get("market_odds") is None or tip_data["market_odds"] >= MIN_ODDS:
+                over_candidates.append(tip_data)
 
     # sort and pick top_n
     one_x_two_sorted = sorted(one_x_two_candidates, key=lambda x: x["probability"], reverse=True)[:top_n]

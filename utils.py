@@ -4,7 +4,17 @@ from pathlib import Path
 from dotenv import load_dotenv
 from typing import List
 from datetime import datetime
-from zoneinfo import ZoneInfo
+
+# Try multiple timezone libraries for robustness
+try:
+    from zoneinfo import ZoneInfo
+except ImportError:
+    try:
+        from backports.zoneinfo import ZoneInfo
+    except ImportError:
+        # Fallback to dateutil if zoneinfo not available
+        from dateutil import tz
+        ZoneInfo = None
 
 def load_env(path: str = ".env"):
     if Path(path).exists():
@@ -40,9 +50,19 @@ def to_local_time(utc_iso: str, tz_name: str = "Europe/Budapest") -> str:
         # Parse the UTC timestamp
         utc_dt = datetime.fromisoformat(utc_iso.replace('Z', '+00:00'))
         
-        # Convert to local timezone
-        local_tz = ZoneInfo(tz_name)
-        local_dt = utc_dt.astimezone(local_tz)
+        # Convert to local timezone using available library
+        if ZoneInfo is not None:
+            local_tz = ZoneInfo(tz_name)
+            local_dt = utc_dt.astimezone(local_tz)
+        else:
+            # Fallback to dateutil
+            from dateutil import tz as dtz
+            local_tz = dtz.gettz(tz_name)
+            if local_tz:
+                local_dt = utc_dt.astimezone(local_tz)
+            else:
+                log("WARNING", f"Could not get timezone {tz_name}, using UTC")
+                return utc_iso
         
         # Format the output
         return local_dt.strftime("%Y-%m-%d %H:%M:%S %Z")

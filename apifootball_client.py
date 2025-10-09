@@ -1,3 +1,6 @@
+"""
+APIFootball async client helpers (updated with H2H helper)
+"""
 import aiohttp
 import asyncio
 import os
@@ -99,32 +102,12 @@ class APIFootballClient:
         return res.get("response", [])
 
     async def get_head_to_head(self, team1_id: int, team2_id: int, last: int = 10) -> List[dict]:
-        """
-        Get head-to-head fixtures between two teams.
-        
-        Args:
-            team1_id: First team ID
-            team2_id: Second team ID
-            last: Number of last H2H matches to retrieve (default: 10)
-            
-        Returns:
-            List of H2H fixture dictionaries sorted by date
-        """
-        # API endpoint: /fixtures?h2h={team1}-{team2}&last={last}
-        h2h_param = f"{team1_id}-{team2_id}"
-        res = await self._get("/fixtures", params={"h2h": h2h_param, "last": last})
-        fixtures = res.get("response", [])
-        
-        # Sort by date to ensure consistent ordering (newest first from API, but let's verify)
+        """Fetch H2H fixtures using /fixtures?h2h=team1-team2&last=.."""
         try:
-            fixtures_sorted = sorted(
-                fixtures, 
-                key=lambda x: x.get("fixture", {}).get("date", ""), 
-                reverse=True
-            )
-            return fixtures_sorted
+            res = await self._get("/fixtures", params={"h2h": f"{team1_id}-{team2_id}", "last": last})
+            return res.get("response", [])
         except Exception as e:
-            log("WARNING", f"Failed to sort H2H fixtures: {e}")
-            return fixtures
+            log("WARNING", f"Failed to fetch H2H for {team1_id} vs {team2_id}: {e}")
+            return []
 
     # Note: add more helper methods as needed for players/injuries/... later.
