@@ -50,7 +50,12 @@ Használat
   python betting.py --fetch --analyze --use-mc
   ```
 
-A Monte Carlo módszer 10,000 iterációval szimulál véletlenszerű Poisson-mintavételezéssel, és empirikus valószínűségeket számol az 1X2, BTTS és Over/Under 2.5 piacokra. A módszer előnye, hogy robusztusabb becslést ad, főleg szélsőséges lambda értékek esetén.
+- Az iterációk számának módosítása (alapértelmezett: 10,000):
+  ```bash
+  python betting.py --fetch --analyze --use-mc --mc-iters 50000
+  ```
+
+A Monte Carlo módszer véletlenszerű Poisson-mintavételezéssel szimulál, és empirikus valószínűségeket számol az 1X2, BTTS és Over/Under 2.5 piacokra. A módszer előnye, hogy robusztusabb becslést ad, főleg szélsőséges lambda értékek esetén. Több iteráció pontosabb eredményeket ad, de lassabb futási idővel jár.
 
 ## ML modellek használata
 
@@ -107,6 +112,12 @@ Az elemzések tartalmazzák a piaci oddsokat és a számított edge/Kelly érté
 - Kelly ajánlás (fractional Kelly és stake ajánlás)
 
 Az edge számítás csak akkor történik, ha piaci odds elérhető az adott piachoz.
+
+**Minimális odds szűrés**: A summarizer csak >= MIN_ODDS (alapértelmezett: 1.85) oddsokkal rendelkező tippeket listáz. Ez környezeti változóval módosítható:
+```bash
+export MIN_ODDS=2.0
+python betting.py --analyze
+```
 
 ## ML Pipeline technikai részletek
 

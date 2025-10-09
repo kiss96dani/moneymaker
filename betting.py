@@ -60,7 +60,7 @@ async def fetch_fixtures(client: APIFootballClient, days_ahead: int, limit: Opti
                 return fixtures
     return fixtures
 
-async def analyze_fixtures(client: APIFootballClient, fixture_ids: Optional[List[int]] = None, limit: Optional[int]=None, use_ml: bool = False, use_mc: bool = False):
+async def analyze_fixtures(client: APIFootballClient, fixture_ids: Optional[List[int]] = None, limit: Optional[int]=None, use_ml: bool = False, use_mc: bool = False, mc_iters: int = 10000):
     # Analyzer currently doesn't require client; instantiate accordingly
     analyzer = Analyzer()
     predictor = Predictor()
@@ -114,13 +114,14 @@ async def analyze_fixtures(client: APIFootballClient, fixture_ids: Optional[List
 
             lambda_h, lambda_a = predictor.compute_lambdas(home_form, away_form)
 
-            # Pass use_mc flag to predictor
+            # Pass use_mc flag and mc_iters to predictor
             try:
                 model_probs, matrix = predictor.match_probabilities(
                     lambda_h, lambda_a, 
                     home_form=home_form, 
                     away_form=away_form,
-                    use_mc=use_mc
+                    use_mc=use_mc,
+                    mc_iters=mc_iters
                 )
             except TypeError:
                 # Fallback for older predictor signature
@@ -187,7 +188,7 @@ async def main_async(args):
             fids = None
             if args.fixture_ids:
                 fids = [int(x.strip()) for x in args.fixture_ids.split(",") if x.strip().isdigit()]
-            results = await analyze_fixtures(client, fixture_ids=fids, limit=args.limit, use_ml=args.use_ml, use_mc=args.use_mc)
+            results = await analyze_fixtures(client, fixture_ids=fids, limit=args.limit, use_ml=args.use_ml, use_mc=args.use_mc, mc_iters=args.mc_iters)
             log("INFO", f"Completed analysis for {len(results)} fixtures")
 
             # Print full analysis JSON (existing behaviour)
@@ -222,6 +223,7 @@ def parse_args():
     p.add_argument("--limit", type=int, help="Limit number of fixtures to fetch/analyze")
     p.add_argument("--use-ml", action="store_true", help="Use ML models if available (fallback to Poisson if not)")
     p.add_argument("--use-mc", action="store_true", help="Use Monte Carlo simulation for probability calculations")
+    p.add_argument("--mc-iters", type=int, default=10000, help="Number of Monte Carlo iterations (default: 10000)")
     return p.parse_args()
 
 def main():
