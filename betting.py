@@ -60,7 +60,7 @@ async def fetch_fixtures(client: APIFootballClient, days_ahead: int, limit: Opti
                 return fixtures
     return fixtures
 
-async def analyze_fixtures(client: APIFootballClient, fixture_ids: Optional[List[int]] = None, limit: Optional[int]=None, use_ml: bool = False, use_mc: bool = False, mc_iters: int = 10000):
+async def analyze_fixtures(client: APIFootballClient, fixture_ids: Optional[List[int]] = None, limit: Optional[int]=None, use_ml: bool = False, use_mc: bool = False, mc_iters: int = 10000, include_past: bool = False):
     # Analyzer currently doesn't require client; instantiate accordingly
     analyzer = Analyzer()
     predictor = Predictor()
@@ -83,9 +83,24 @@ async def analyze_fixtures(client: APIFootballClient, fixture_ids: Optional[List
             to_analyze.append(read_json(p))
 
     results = []
+    now_utc = datetime.now(timezone.utc)
+    
     for f in to_analyze:
         try:
             fixture_meta = analyzer.extract_fixture_meta(f)
+            
+            # Skip past fixtures unless --include-past is set
+            if not include_past:
+                kickoff_str = fixture_meta.get("kickoff_utc")
+                if kickoff_str:
+                    try:
+                        kickoff_dt = datetime.fromisoformat(kickoff_str.replace('Z', '+00:00'))
+                        if kickoff_dt < now_utc:
+                            log("INFO", f"Skipping past fixture {fixture_meta['fixture_id']} (kickoff: {kickoff_str})")
+                            continue
+                    except Exception as e:
+                        log("WARNING", f"Could not parse kickoff time for fixture {fixture_meta['fixture_id']}: {e}")
+            
             home_team = fixture_meta["home_team_id"]
             away_team = fixture_meta["away_team_id"]
 
@@ -174,6 +189,45 @@ async def main_async(args):
     client = APIFootballClient(api_key=key)
 
     try:
+        # Handle Tippmix scraping
+        if args.tippmix_scrape:
+            try:
+                from tippmix_scraper import scrape_tippmix
+                count = scrape_tippmix()
+                log("INFO", f"Tippmix scraper completed: {count} matches found")
+            except Exception as e:
+                log("ERROR", f"Tippmix scraper failed: {e}")
+        
+        # Handle ML training
+        if args.train_models:
+            try:
+                from models import ModelTrainer
+                
+                # Parse training parameters
+                train_from = args.train_from
+                train_to = args.train_to
+                leagues_str = args.leagues or "39,61"
+                league_ids = [int(x.strip()) for x in leagues_str.split(",") if x.strip().isdigit()]
+                
+                if not train_from or not train_to:
+                    log("ERROR", "Training requires --train-from and --train-to dates (YYYY-MM-DD)")
+                    return
+                
+                log("INFO", f"Starting ML training: {train_from} to {train_to}, leagues: {league_ids}")
+                trainer = ModelTrainer(client)
+                await trainer.train(
+                    start_date=train_from,
+                    end_date=train_to,
+                    league_ids=league_ids
+                )
+                log("INFO", "ML training completed")
+                return
+            except Exception as e:
+                log("ERROR", f"ML training failed: {e}")
+                import traceback
+                traceback.print_exc()
+                return
+        
         if args.reload_leagues:
             # placeholder: download leagues tiers, not implemented in depth
             leagues = await client.get_leagues()
@@ -188,7 +242,17 @@ async def main_async(args):
             fids = None
             if args.fixture_ids:
                 fids = [int(x.strip()) for x in args.fixture_ids.split(",") if x.strip().isdigit()]
-            results = await analyze_fixtures(client, fixture_ids=fids, limit=args.limit, use_ml=args.use_ml, use_mc=args.use_mc, mc_iters=args.mc_iters)
+            
+            # Pass include_past and require_tippmix flags
+            results = await analyze_fixtures(
+                client, 
+                fixture_ids=fids, 
+                limit=args.limit, 
+                use_ml=args.use_ml, 
+                use_mc=args.use_mc, 
+                mc_iters=args.mc_iters,
+                include_past=args.include_past
+            )
             log("INFO", f"Completed analysis for {len(results)} fixtures")
 
             # Print full analysis JSON (existing behaviour)
@@ -196,7 +260,7 @@ async def main_async(args):
 
             # Summarize top markets: prints and writes a daily report in daily_reports/
             try:
-                report = summarize_results(results, top_n=3)
+                report = summarize_results(results, top_n=3, require_tippmix=args.require_tippmix)
                 # persist the report
                 now = datetime.now(timezone.utc).strftime("%Y-%m-%d")
                 report_path = DAILY_DIR / f"top_markets_{now}.json"
@@ -224,6 +288,20 @@ def parse_args():
     p.add_argument("--use-ml", action="store_true", help="Use ML models if available (fallback to Poisson if not)")
     p.add_argument("--use-mc", action="store_true", help="Use Monte Carlo simulation for probability calculations")
     p.add_argument("--mc-iters", type=int, default=10000, help="Number of Monte Carlo iterations (default: 10000)")
+    
+    # Tippmix integration
+    p.add_argument("--tippmix-scrape", action="store_true", help="Run Tippmix scraper before analysis")
+    p.add_argument("--require-tippmix", action="store_true", help="Only include tips that are available on Tippmix")
+    
+    # ML training
+    p.add_argument("--train-models", action="store_true", help="Train ML models on historical data")
+    p.add_argument("--train-from", type=str, help="Start date for training data (YYYY-MM-DD)")
+    p.add_argument("--train-to", type=str, help="End date for training data (YYYY-MM-DD)")
+    p.add_argument("--leagues", type=str, help="Comma-separated league IDs for training (default: 39,61)")
+    
+    # Time filtering
+    p.add_argument("--include-past", action="store_true", help="Include past fixtures (by default only future fixtures)")
+    
     return p.parse_args()
 
 def main():
