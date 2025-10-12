@@ -131,6 +131,30 @@ Kimenet
 - daily_reports/: napi top mérkőzések összefoglalók (top_markets_YYYY-MM-DD.json)
 - config/: konfigurációs adatok (pl. ligák listája)
 - models/: betanított ML modellek (*.pkl fájlok)
+- rendered_tickets/: renderelt fogadási jegyek képként (check_analysis_json.py által generálva)
+
+## Fogadási jegyek vizualizáció és megosztás
+
+A `check_analysis_json.py` script segítségével a napi összefoglalókból vizuális fogadási jegyeket készíthetsz:
+
+```bash
+# Top 3 tipp renderelése képként
+python check_analysis_json.py --max-picks 3
+
+# Adott nap jelentésének feldolgozása
+python check_analysis_json.py --date 2025-10-12
+
+# Képek küldése (email/webhook)
+python check_analysis_json.py --max-picks 3 --send
+
+# Egyedi betűtípus használata
+python check_analysis_json.py --font /path/to/custom/font.ttf
+
+# Csak konzol kimenet, kép renderelés nélkül
+python check_analysis_json.py --no-render
+```
+
+A renderelt képek a `rendered_tickets/` könyvtárban tárolódnak.
 
 ## Új funkciók
 
